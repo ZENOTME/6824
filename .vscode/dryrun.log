@@ -1,0 +1,12 @@
+make: Entering directory `/Users/ze/Project/6.824'
+Checking that your submission builds correctly...
+ 
+unknown lab: Makefile
+
+make: *** [check-Makefile] Error 1
+make: Failed to remake makefile `Makefile'.
+make: *** No targets specified and no makefile found.  Stop.
+
+rm check-Makefile
+make: Leaving directory `/Users/ze/Project/6.824'
+ 

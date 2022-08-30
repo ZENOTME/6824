@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -24,6 +26,31 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
+type AskForFileArgs struct {
+}
+
+type AskForFileReply struct {
+	File    string
+	Nreduce int64
+}
+
+type MapDoneArgs struct {
+	File string
+}
+
+type MapDoneReply struct {
+}
+
+type AskForReduceArgs struct {
+}
+
+//
+// Index == -1 means no reduce(already done)
+type AskForReduceReply struct {
+	Ready bool
+	Index int64
+	Files []string
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
