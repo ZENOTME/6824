@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 
-rm *-intermediate-*
+rm mrinter-*
 rm mr-out-*

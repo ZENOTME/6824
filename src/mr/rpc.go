@@ -26,16 +26,20 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 
-type AskForFileArgs struct {
+type AskForMapArgs struct {
 }
 
-type AskForFileReply struct {
-	File    string
-	Nreduce int64
+type AskForMapReply struct {
+	Wait     bool
+	WorkerId int64
+	TaskId   int64
+	File     string
+	Nreduce  int64
 }
 
 type MapDoneArgs struct {
-	File string
+	WorkerID int64
+	TaskId   int64
 }
 
 type MapDoneReply struct {
@@ -47,9 +51,21 @@ type AskForReduceArgs struct {
 //
 // Index == -1 means no reduce(already done)
 type AskForReduceReply struct {
-	Ready bool
-	Index int64
-	Files []string
+	Wait        bool
+	Ready       bool
+	Done        bool
+	WorkerID    int64
+	TaskId      int64
+	Reduceindex int64
+	InterIDs    []int64
+}
+
+type ReduceDoneArgs struct {
+	WorkerID int64
+	TaskID   int64
+}
+
+type ReduceDoneReply struct {
 }
 
 // Cook up a unique-ish UNIX-domain socket name

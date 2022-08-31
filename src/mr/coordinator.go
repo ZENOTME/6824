@@ -11,19 +11,50 @@ import (
 	"sync/atomic"
 )
 
+type State string
+
+const (
+	idle State = "idle"
+	run  State = "run"
+	done State = "done"
+)
+
+type MapTask struct {
+	id int
+
+	filename string
+	// Assigned Worker Id
+	assignid WorkerID
+	state    State
+}
+
+type ReduceTask struct {
+	id          int
+	reduceindex int
+	assignid    WorkerID
+	state       State
+}
+
 type Coordinator struct {
 	// Your definitions here.
-	nFile int
-
-	mu           sync.Mutex
-	remain_files []string
-
-	reduce_mu    sync.Mutex
-	reduce_files []string
-
 	nReduce int64
+	nFile   int64
 
-	ReduceIndex int64
+	mapTasks_mu sync.Mutex
+	mapTasks    []MapTask
+	mapDone     int64
+
+	// Used to indicated reduce is ready
+	// Need to read atmoic
+	reduceReady int32
+
+	reduceTask_mu sync.Mutex
+	reduceTasks   []ReduceTask
+	reduceDone    int64
+
+	// Used to indicated reduce is ready
+	// Need to read atmoic
+	allDone int32
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -40,53 +71,126 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 
 //
 // ask for file
-func (c *Coordinator) AskForFile(args *AskForFileArgs, reply *AskForFileReply) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.remain_files) == 0 {
+func (c *Coordinator) AskForMap(args *AskForMapArgs, reply *AskForMapReply) error {
+	if atomic.LoadInt64(&c.mapDone) == c.nFile {
 		reply.File = ""
 	} else {
-		log.Println("send file:", c.remain_files[0])
-		reply.File = c.remain_files[0]
-		c.remain_files = c.remain_files[1:]
+		// wait indicates that there is no map task idle but not all map task done
+		var wait bool = true
+		c.mapTasks_mu.Lock()
+		defer c.mapTasks_mu.Unlock()
+		for i, task := range c.mapTasks {
+			if task.state == idle {
+				workid := GetWorkerId()
+				reply.TaskId = int64(task.id)
+				reply.WorkerId = int64(workid)
+				reply.File = task.filename
+				reply.Nreduce = c.nReduce
+
+				c.mapTasks[i].state = run
+				c.mapTasks[i].assignid = workid
+				// TODO : register a timer to monitor the task
+				log.Printf("send map task %v to worker %v\n", task.filename, workid)
+				wait = false
+				break
+			}
+		}
+		reply.Wait = wait
 	}
-	reply.Nreduce = c.nReduce
+
 	return nil
 }
 
 //
 // Called by Client to indicates that the file has been processed
 func (c *Coordinator) MapDone(args *MapDoneArgs, reply *MapDoneReply) error {
-	c.reduce_mu.Lock()
-	defer c.reduce_mu.Unlock()
-	c.reduce_files = append(c.reduce_files, args.File)
-	log.Printf("receive map done: %v\n", args.File)
+	c.mapTasks_mu.Lock()
+	defer c.mapTasks_mu.Unlock()
+
+	if c.mapTasks[args.TaskId].assignid == WorkerID(args.WorkerID) {
+		c.mapTasks[args.TaskId].state = done
+		n := atomic.AddInt64(&c.mapDone, 1)
+		log.Printf("map task %v done from %v ", c.mapTasks[args.TaskId].filename, args.WorkerID)
+		if n == c.nFile {
+			// Generates ReduceMap
+			c.reduceTask_mu.Lock()
+			c.reduceTasks = make([]ReduceTask, c.nReduce)
+			defer c.reduceTask_mu.Unlock()
+			for i := range c.reduceTasks {
+				c.reduceTasks[i].id = i
+				c.reduceTasks[i].reduceindex = i
+				c.reduceTasks[i].state = idle
+			}
+			atomic.StoreInt32(&c.reduceReady, 1)
+			log.Printf("Generate reduce tasks : %v\n", c.reduceTasks)
+		}
+	}
+
 	return nil
 }
 
 //
 // Called by Client to ask for a reduce index
 func (c *Coordinator) AskForReduce(args *AskForReduceArgs, reply *AskForReduceReply) error {
-	c.reduce_mu.Lock()
-	defer c.reduce_mu.Unlock()
-	if len(c.reduce_files) < c.nFile {
-		reply.Ready = false
-		reply.Index = -1
-	} else if atomic.LoadInt64(&c.ReduceIndex) == c.nReduce {
+	c.reduceTask_mu.Lock()
+	defer c.reduceTask_mu.Unlock()
+
+	if atomic.LoadInt32(&c.reduceReady) == 1 {
 		reply.Ready = true
-		reply.Index = -1
+		if atomic.LoadInt32(&c.allDone) == 1 {
+			reply.Done = true
+		} else {
+			// wait indicates that there is no reduce task idle but not all reduce task done
+			// some are running
+			var wait bool = true
+			for i, task := range c.reduceTasks {
+				if task.state == idle {
+					workid := GetWorkerId()
+					reply.Done = false
+					reply.WorkerID = int64(workid)
+					reply.TaskId = int64(task.id)
+					reply.Reduceindex = int64(task.reduceindex)
+
+					// NOTE: we can guarantee that mapTask will not be modified in this time
+					// TODO : change to write-read lock
+					for _, task := range c.mapTasks {
+						if task.state != done {
+							panic("map task not done")
+						}
+						reply.InterIDs = append(reply.InterIDs, int64(task.assignid))
+					}
+
+					c.reduceTasks[i].assignid = workid
+					c.reduceTasks[i].state = run
+					log.Printf("send reduce task %v to worker %v\n", task.reduceindex, workid)
+					// TODO : register a timer to monitor the task
+					wait = false
+					break
+				}
+			}
+			reply.Wait = wait
+		}
 	} else {
-		reply.Ready = true
-		reply.Index = atomic.LoadInt64(&c.ReduceIndex)
-		reply.Files = c.reduce_files
-		log.Printf("send reduce job, index : %v\n", reply.Index)
-		atomic.AddInt64(&c.ReduceIndex, 1)
+		reply.Ready = false
 	}
+
 	return nil
 }
 
-func LoadInt32(i int) {
-	panic("unimplemented")
+func (c *Coordinator) ReduceDone(args *ReduceDoneArgs, reply *ReduceDoneReply) error {
+	c.reduceTask_mu.Lock()
+	defer c.reduceTask_mu.Unlock()
+
+	if c.reduceTasks[args.TaskID].assignid == WorkerID(args.WorkerID) {
+		c.reduceTasks[args.TaskID].state = done
+		log.Printf("reduce task %v done from %v ", c.reduceTasks[args.TaskID].reduceindex, args.WorkerID)
+		n := atomic.AddInt64(&c.reduceDone, 1)
+		if n == c.nReduce {
+			atomic.StoreInt32(&c.allDone, 1)
+		}
+	}
+
+	return nil
 }
 
 //
@@ -112,7 +216,7 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 
 	// Your code here.
-	return atomic.LoadInt64(&c.ReduceIndex) == c.nReduce
+	return atomic.LoadInt64(&c.reduceDone) == c.nReduce
 }
 
 //
@@ -122,12 +226,23 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	log.SetOutput(ioutil.Discard)
-	c := Coordinator{
-		remain_files: files,
-		nReduce:      int64(nReduce),
-		nFile:        len(files),
+	// Generate Map tasks
+	tasks := make([]MapTask, len(files))
+	for i := 0; i < len(tasks); i++ {
+		tasks[i].id = i
+		tasks[i].state = idle
+		tasks[i].filename = files[i]
 	}
-	log.Printf("%v\n", c.remain_files)
+	c := Coordinator{
+		mapTasks:    tasks,
+		nReduce:     int64(nReduce),
+		nFile:       int64(len(files)),
+		reduceTasks: nil,
+		reduceReady: 0,
+		allDone:     0,
+	}
+
+	log.Printf("%v\n", c.mapTasks)
 	log.Printf("nFile: %v\n", c.nFile)
 	log.Printf("nReduce: %v\n", nReduce)
 

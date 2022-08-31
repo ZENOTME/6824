@@ -50,6 +50,7 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 	log.SetOutput(ioutil.Discard)
+
 	for {
 		// map job
 		err := map_job(mapf)
@@ -70,71 +71,74 @@ func Worker(mapf func(string, string) []KeyValue,
 
 // map job
 func map_job(mapf func(string, string) []KeyValue) error {
-	filename, nreduce := CallAskForFile()
-	if filename == "" {
+	map_reply := CallAskForMap()
+	if map_reply.Wait || map_reply.File == "" {
 		log.Println("no file to process")
 	} else {
-		file, err := os.Open(filename)
+		log.Printf("receive workid: %v, filename: %v\n", map_reply.WorkerId, map_reply.File)
+
+		file, err := os.Open(map_reply.File)
 		if err != nil {
-			return fmt.Errorf("cannot open %v", filename)
+			return fmt.Errorf("cannot open %v", map_reply.File)
 		}
 		content, err := ioutil.ReadAll(file)
 		if err != nil {
-			return fmt.Errorf("cannot read %v", filename)
+			return fmt.Errorf("cannot read %v", map_reply.File)
 		}
 		defer file.Close()
 
 		// Process the file.
-		kva := mapf(filename, string(content))
+		kva := mapf(map_reply.File, string(content))
 
 		// Create intermediate files.
-		intermediate_filename := filename + "-intermediate-"
-		encoders := make([]*json.Encoder, nreduce)
-		for i := int64(0); i < nreduce; i++ {
+		intermediate_filename := "mrinter-" + strconv.Itoa(int(map_reply.WorkerId)) + "-"
+		encoders := make([]*json.Encoder, map_reply.Nreduce)
+		for i := int64(0); i < map_reply.Nreduce; i++ {
 			file, err = os.Create(intermediate_filename + strconv.Itoa(int(i)))
-			defer file.Close()
 			if err != nil {
 				log.Fatalf("cannot open %v", intermediate_filename)
 			}
+			defer file.Close()
 			encoders[i] = json.NewEncoder(file)
 		}
 		for _, kv := range kva {
-			reduce_index := int64(ihash(kv.Key)) % nreduce
+			reduce_index := int64(ihash(kv.Key)) % map_reply.Nreduce
 			err := encoders[reduce_index].Encode(&kv)
 			if err != nil {
-				return fmt.Errorf("cannot encode %v in %v", kv, filename)
+				return fmt.Errorf("cannot encode %v in %v", kv, map_reply.File)
 			}
 		}
-		if !CallMapDone(filename) {
+		if !CallMapDone(map_reply.TaskId, map_reply.WorkerId) {
 			return fmt.Errorf("cannot send map done signal")
 		}
 
 		// Done
-		log.Printf("Processing %v done\n", filename)
+		log.Printf("Processing %v done\n", map_reply.File)
 	}
 	return nil
 }
 
 // reduce job
 func reduce_job(reducef func(string, []string) string) (bool, error) {
-	var reply AskForReduceReply
-
-	reply = CallAskForReduce()
+	reply := CallAskForReduce()
 	if !reply.Ready {
 		log.Printf("reduce job is not ready\n")
 		return false, nil
-	} else if reply.Index == -1 {
+	} else if reply.Done {
 		log.Printf("reduce job is done\n")
 		return true, nil
+	} else if reply.Wait {
+		log.Printf("reduce job is waiting\n")
+		return false, nil
 	} else {
 		// do reduce job
-		log.Printf("get reduce job: %v intermidiated files: %v\n", reply.Index, reply.Files)
+		log.Printf("get reduce job: %v from intermidiated worker : %v\n", reply.Reduceindex, reply.InterIDs)
 	}
 
 	// read all the record
 	intermediate_kvs := []KeyValue{}
-	for _, filename := range reply.Files {
-		filename = filename + "-intermediate-" + strconv.Itoa(int(reply.Index))
+	for _, workerid := range reply.InterIDs {
+		filename := "mrinter-" + strconv.Itoa(int(workerid)) + "-" + strconv.Itoa(int(reply.Reduceindex))
 		file, err := os.Open(filename)
 		if err != nil {
 			return false, fmt.Errorf("cannot open %v", filename)
@@ -157,7 +161,7 @@ func reduce_job(reducef func(string, []string) string) (bool, error) {
 	// build the {key,{value1,value2...}}
 	// processing use the reducef function
 	// write back the result
-	oname := "mr-out-" + strconv.Itoa(int(reply.Index))
+	oname := "mr-out-" + strconv.Itoa(int(reply.Reduceindex))
 	ofile, err := os.Create(oname)
 	if err != nil {
 		return false, fmt.Errorf("cannot create %v", oname)
@@ -182,36 +186,35 @@ func reduce_job(reducef func(string, []string) string) (bool, error) {
 	}
 
 	defer ofile.Close()
+
+	CallReduceDone(reply.TaskId, reply.WorkerID)
 	log.Printf("%v finished \n", oname)
 	return false, nil
 }
 
 //
 // function call ask for file name
-func CallAskForFile() (string, int64) {
+func CallAskForMap() AskForMapReply {
 	// declare an argument structure.
-	args := AskForFileArgs{}
+	args := AskForMapArgs{}
 	// declare a reply structure.
-	reply := AskForFileReply{}
+	reply := AskForMapReply{}
 
 	// send the RPC request, wait for the reply.
 	// the "Coordinator.AskForFile" tells the
 	// receiving server that we'd like to call
 	// the AskForFile() method of struct Coordinator.
-	ok := call("Coordinator.AskForFile", &args, &reply)
-	if ok {
-		// reply.file_name should be 100.
-		log.Printf("receive reply.file_name %v\n", reply.File)
-	} else {
-		log.Printf("CallAskForFile failed!\n")
+	ok := call("Coordinator.AskForMap", &args, &reply)
+	if !ok {
+		log.Printf("CallAskForMap failed!\n")
 	}
-	return reply.File, reply.Nreduce
+	return reply
 }
 
 //
 // function call ask for map done
-func CallMapDone(name string) bool {
-	args := MapDoneArgs{name}
+func CallMapDone(task_id int64, worker_id int64) bool {
+	args := MapDoneArgs{worker_id, task_id}
 	reply := MapDoneReply{}
 	ok := call("Coordinator.MapDone", &args, &reply)
 	if !ok {
@@ -230,6 +233,16 @@ func CallAskForReduce() AskForReduceReply {
 		log.Printf("CallAskForReduce failed!\n")
 	}
 	return reply
+}
+
+func CallReduceDone(task_id int64, worker_id int64) bool {
+	args := ReduceDoneArgs{worker_id, task_id}
+	reply := ReduceDoneReply{}
+	ok := call("Coordinator.ReduceDone", &args, &reply)
+	if !ok {
+		log.Printf("CallReduceDone failed!\n")
+	}
+	return ok
 }
 
 //
