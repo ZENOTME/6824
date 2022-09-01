@@ -9,6 +9,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type State string
@@ -90,6 +91,17 @@ func (c *Coordinator) AskForMap(args *AskForMapArgs, reply *AskForMapReply) erro
 				c.mapTasks[i].state = run
 				c.mapTasks[i].assignid = workid
 				// TODO : register a timer to monitor the task
+				timer := time.NewTimer(10 * time.Second)
+				time_i := i
+				go func() {
+					<-timer.C // wait for timer
+					c.mapTasks_mu.Lock()
+					defer c.mapTasks_mu.Unlock()
+					if c.mapTasks[time_i].state == run {
+						c.mapTasks[time_i].state = idle
+					}
+				}()
+
 				log.Printf("send map task %v to worker %v\n", task.filename, workid)
 				wait = false
 				break
@@ -164,6 +176,17 @@ func (c *Coordinator) AskForReduce(args *AskForReduceArgs, reply *AskForReduceRe
 					c.reduceTasks[i].state = run
 					log.Printf("send reduce task %v to worker %v\n", task.reduceindex, workid)
 					// TODO : register a timer to monitor the task
+
+					timer := time.NewTimer(10 * time.Second)
+					time_i := i
+					go func() {
+						<-timer.C // wait for timer
+						c.reduceTask_mu.Lock()
+						defer c.reduceTask_mu.Unlock()
+						if c.reduceTasks[time_i].state == run {
+							c.reduceTasks[time_i].state = idle
+						}
+					}()
 					wait = false
 					break
 				}
